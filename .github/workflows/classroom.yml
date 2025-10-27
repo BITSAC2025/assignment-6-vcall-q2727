@@ -1,0 +1,136 @@
+name: AutoGrader
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+env:
+  SVF_DIR: ${{ github.workspace }}/SVF
+  LLVM_DIR: ${{ github.workspace }}/SVF/llvm-16.0.0.obj
+  ASSIGNMENT_DIR: ${{ github.workspace }}
+
+jobs:
+  grade-assignment:
+    runs-on: ubuntu-latest
+    name: Compare with Reference Answer
+
+    steps:
+      # Checkout students' code
+      - name: Checkout Student's Code
+        uses: actions/checkout@v4
+
+      # Install system dependencies
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install cmake gcc g++ nodejs doxygen graphviz lcov libncurses5-dev libtinfo6 libzstd-dev
+
+      # Set LLVM path
+      - name: Add LLVM to PATH
+        run: echo "${{ env.LLVM_DIR }}/bin" >> $GITHUB_PATH
+
+      # Checkout and build SVF dependency
+      - name: Checkout and Build SVF
+        uses: actions/checkout@v4
+        with:
+          repository: BITSAC2025/SVF
+          path: SVF
+
+      # Build and install SVF
+      - name: Build SVF
+        run: |
+          cd SVF
+          chmod +x build.sh
+          ./build.sh
+
+      # Compile students' code
+      - name: Compile Student's Code
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      # Checkout reference answer and test scripts
+      - name: Checkout Answer Repository
+        uses: actions/checkout@v4
+        with:
+          repository: kisslune/Answers
+          token: ${{ secrets.ORG_ACCESS_TOKEN }}
+          path: answer-repo
+
+      # Prepare test environment
+      - name: Prepare Test Environment
+        run: |
+          cp answer-repo/Assignment-2-IR/autogen.sh $ASSIGNMENT_DIR/Assignment-2-IR
+          cp answer-repo/Assignment-2-IR/normgraph.sh $ASSIGNMENT_DIR/Assignment-2-IR
+          cd $ASSIGNMENT_DIR/Assignment-2-IR
+          chmod +x autogen.sh normgraph.sh
+
+      # Run student's code and capture output
+      - name: Run Student's Code
+        run: |
+          cd $ASSIGNMENT_DIR/Assignment-2-IR
+          ./autogen.sh
+
+      # Compare answers
+      - name: Compare Answers
+        run: |
+          ANSWER_SOURCE_DIR="answer-repo/Assignment-2-IR/answers"
+          ANSWER_STUDENT_DIR="$ASSIGNMENT_DIR/Assignment-2-IR/answers"
+          RESULTS_DIR="$ASSIGNMENT_DIR/Assignment-2-IR/test-results"
+          mkdir -p $RESULTS_DIR
+          
+          correct_count=0
+          wrong_count=0
+          total_count=0
+          
+          echo "Starting answer comparison..."
+          echo "Reference answers: $ANSWER_SOURCE_DIR"
+          echo "Student answers: $ANSWER_STUDENT_DIR"
+          echo ""
+          
+          if [ ! -d "$ANSWER_STUDENT_DIR" ]; then
+            echo "Student answers directory not found: $ANSWER_STUDENT_DIR"
+            exit 1
+          fi
+          
+          for answer_file in $ANSWER_SOURCE_DIR/*; do
+            if [ -f "$answer_file" ]; then
+              filename=$(basename "$answer_file")
+              student_file="$ANSWER_STUDENT_DIR/$filename"
+              total_count=$((total_count + 1))
+            
+              if [ -f "$student_file" ]; then
+                if diff -b -q "$answer_file" "$student_file" > /dev/null; then
+                  echo "CORRECT: $filename"
+                  correct_count=$((correct_count + 1))
+                else
+                  echo "WRONG: $filename"
+                  wrong_count=$((wrong_count + 1))
+                  diff -b "$answer_file" "$student_file" > "$RESULTS_DIR/diff_$filename" 2>&1 || true
+                fi
+              else
+                echo "MISSING: $filename (student file not found)"
+                wrong_count=$((wrong_count + 1))
+              fi
+              echo ""
+            fi
+          done
+          
+          echo "=================== SUMMARY ==================="
+          echo "Total files compared: $total_count"
+          echo "Correct answers: $correct_count"
+          echo "Wrong/Missing answers: $wrong_count"
+          
+          echo "Total: $total_count, Correct: $correct_count, Wrong: $wrong_count" > "$RESULTS_DIR/summary.txt"
+
+      # Upload artifacts
+      - name: Upload Results as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grading-artifacts
+          path: |
+            $ASSIGNMENT_DIR/test-results/
+          retention-days: 365
